@@ -97,10 +97,9 @@ def interpolate_ratio(user_cp_man: float, anchors: list) -> float:
         return float(np.interp(user_cp_man, cps, ratios))
 
 # ---------------------------------------------------------
-# 3. 넥슨 Open API 통신 (암호화된 Secrets에서 호출)
+# 3. 넥슨 Open API 통신 (Streamlit Secrets에서 호출)
 # ---------------------------------------------------------
 def fetch_user_data(char_name: str):
-    # Streamlit Cloud 환경 비밀 설정에서 안전하게 주입
     if "NEXON_API_KEY" in st.secrets:
         api_key = st.secrets["NEXON_API_KEY"]
     else:
@@ -136,7 +135,7 @@ def fetch_user_data(char_name: str):
     return combat_power, basic_info, None
 
 # ---------------------------------------------------------
-# 4. 2차원 Knapsack DP 엔진
+# 4. 2차원 Knapsack DP 최적화
 # ---------------------------------------------------------
 def optimize_boss_route(boss_df, total_time_limit_min, prep_time_min, max_boss_count=12):
     groups = boss_df.groupby('boss_group')
@@ -144,79 +143,4 @@ def optimize_boss_route(boss_df, total_time_limit_min, prep_time_min, max_boss_c
 
     for _, group in groups:
         options = []
-        for _, row in group.iterrows():
-            weight = int(row['clear_time_min'] + prep_time_min)
-            value = int(row['meso_reward'])
-            options.append({
-                'name': f"{row['boss_group']} ({row['difficulty']})",
-                'weight': weight,
-                'value': value,
-                'clear_time': row['clear_time_min'],
-                'meso': row['meso_reward'],
-                'ratio': row['ratio']
-            })
-        group_list.append(options)
-
-    num_groups = len(group_list)
-    W = int(total_time_limit_min)
-    C = int(max_boss_count)
-
-    dp = np.zeros((num_groups + 1, W + 1, C + 1), dtype=np.int64)
-    choice = np.full((num_groups + 1, W + 1, C + 1), -1, dtype=np.int8)
-
-    for i in range(1, num_groups + 1):
-        current_options = group_list[i - 1]
-        for w in range(W + 1):
-            for c in range(C + 1):
-                dp[i][w][c] = dp[i - 1][w][c]
-                if c >= 1:
-                    for opt_idx, opt in enumerate(current_options):
-                        if w >= opt['weight']:
-                            cand = dp[i - 1][w - opt['weight']][c - 1] + opt['value']
-                            if cand > dp[i][w][c]:
-                                dp[i][w][c] = cand
-                                choice[i][w][c] = opt_idx
-
-    selected = []
-    curr_w, curr_c = W, C
-    for i in range(num_groups, 0, -1):
-        opt_idx = choice[i][curr_w][curr_c]
-        if opt_idx != -1:
-            chosen = group_list[i - 1][opt_idx]
-            selected.append(chosen)
-            curr_w -= chosen['weight']
-            curr_c -= 1
-
-    return dp[num_groups][W][C], selected[::-1]
-
-# ---------------------------------------------------------
-# 5. UI 화면
-# ---------------------------------------------------------
-def main():
-    st.set_page_config(page_title="메이플 주간 보스 최적 루트 플래너", layout="wide")
-    st.title("🍁 메이플 주간 보스 최적 루트 플래너")
-    st.caption("캐릭터 닉네임만 입력하면 넥슨 공식 API와 자체 보간 엔진이 즉시 최적 경로를 도출합니다.")
-
-    st.sidebar.header("🕹️ 플레이 환경 설정")
-    total_time_limit = st.sidebar.slider("가용 보스 플레이 시간 (분)", 30, 180, 60, 5)
-    prep_time = st.sidebar.slider("보스 간 정비/입장 시간 (분)", 0, 3, 1)
-
-    char_name = st.text_input("캐릭터 닉네임을 입력하세요", placeholder="예: 타락파워전사")
-
-    if st.button("🚀 데이터 분석 및 최적 루트 산출"):
-        if not char_name.strip():
-            st.warning("닉네임을 입력해주세요.")
-            return
-
-        with st.spinner("넥슨 공식 API에서 최신 스펙을 동기화 중..."):
-            combat_power, basic_info, err = fetch_user_data(char_name)
-
-        if err:
-            st.error(err)
-            return
-
-        user_cp_man = combat_power / 10000.0
-
-        col_a, col_b, col_c = st.columns(3)
-        col_a.metric("직업", basic_info.get("character_class", "알 수 없음"))
-        col_b.metric("레벨", f"Lv. {basic_info.get('character_level', 0
+        for
