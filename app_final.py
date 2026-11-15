@@ -18,29 +18,29 @@ def get_api_key() -> str:
     return DEFAULT_NEXON_API_KEY
 
 # ---------------------------------------------------------
-# 1. 솔 에르다 조각 누적 소모량 테이블 (레벨 1~30 누적) & 딜 효율 커브
+# 1. 정확한 인게임 솔 에르다 조각 누적 소모량 테이블 (레벨 0~30 누적) & 딜 효율 커브
 # ---------------------------------------------------------
-# 코어 종류별 1~30레벨 누적 소모 조각 수 (인덱스 = 레벨)
+# 인게임 실제 소모량 기준 (30레벨 풀강: 스킬 4,400 / 마스터리 2,252 / 강화 3,383 / 공용 6,268)
 CUMULATIVE_FRAGMENTS = {
     "스킬 코어": [
         0, 0, 30, 65, 105, 150, 200, 255, 315, 380, 500,
         630, 770, 920, 1080, 1250, 1430, 1620, 1820, 2030, 2380,
-        2750, 3140, 3550, 3980, 4430, 4900, 5390, 5900, 6430, 7180
+        2530, 2690, 2860, 3040, 3230, 3430, 3640, 3860, 4090, 4400
     ],
     "마스터리 코어": [
         0, 50, 65, 83, 103, 125, 150, 178, 208, 240, 300,
         365, 435, 510, 590, 675, 765, 860, 960, 1065, 1240,
-        1425, 1620, 1825, 2040, 2265, 2500, 2745, 3000, 3265, 3640
+        1315, 1395, 1480, 1570, 1665, 1765, 1870, 1980, 2095, 2252
     ],
     "강화 코어": [
         0, 75, 98, 125, 155, 188, 225, 267, 312, 360, 450,
         548, 653, 765, 885, 1013, 1148, 1290, 1440, 1598, 1860,
-        2138, 2430, 2738, 3060, 3398, 3750, 4118, 4500, 4898, 5460
+        1973, 2093, 2220, 2355, 2498, 2648, 2805, 2970, 3143, 3383
     ],
     "공용 코어": [
         0, 125, 163, 207, 257, 313, 375, 444, 519, 600, 750,
         913, 1088, 1275, 1475, 1688, 1913, 2150, 2400, 2663, 3100,
-        3563, 4050, 4563, 5100, 5663, 6250, 6863, 7500, 8163, 9100
+        3350, 3615, 3895, 4190, 4500, 4825, 5165, 5520, 5890, 6268
     ]
 }
 
@@ -56,8 +56,9 @@ def calc_hexa_efficiency(total_fragments: int) -> float:
 # 2. 다중 앵커 메타데이터 (1억~7.4억 실측 배율 & 결정석 가격)
 # ---------------------------------------------------------
 ANCHOR_CPS = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.4]) * 100_000_000
-MAX_TIME_LIMIT = 20
+MAX_TIME_LIMIT = 20  # 모든 보스 최대 제한 시간: 20분
 
+# (boss_group, difficulty, [1억, 2억, 3억, 4억, 5억, 6억, 7억, 7.4억 배율%], meso_uk, min_time, is_monthly)
 MULTI_ANCHOR_BOSS_DATA = [
     # 1행
     ("발드릭스", "익스트림", [5.0, 9.0, 14.0, 18.0, 22.0, 27.0, 31.0, 33.0], 96.00, 8, False),
@@ -127,7 +128,7 @@ BOSS_META = [
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
 def get_character_full_spec(character_name: str):
-    """전투력과 6차 헥사 코어 레벨(누적 솔 에르다 조각)을 동시에 조회"""
+    """전투력과 6차 헥사 코어 레벨(누적 솔 에르다 조각, 솔 야누스 제외)을 동시에 조회"""
     api_key = get_api_key().strip()
     if not api_key or "여기에_" in api_key:
         return None, "서버에 넥슨 API 키가 설정되지 않았습니다."
@@ -163,7 +164,7 @@ def get_character_full_spec(character_name: str):
                 combat_power = int(s.get("stat_value", 0))
                 break
 
-# 3) 헥사 매트릭스 조회 및 누적 조각 합산 (솔 야누스 제외)
+        # 3) 헥사 매트릭스 조회 및 누적 조각 합산 (솔 야누스 등 사냥 코어 제외)
         hexa_res = requests.get(
             f"https://open.api.nexon.com/maplestory/v1/character/hexamatrix?ocid={ocid}",
             headers=headers, timeout=5
@@ -172,11 +173,14 @@ def get_character_full_spec(character_name: str):
         if hexa_res.status_code == 200:
             cores = hexa_res.json().get("character_hexa_core_equipment") or []
             for c in cores:
-                cname = c.get("hexa_core_name", "")
-                linked_skills = [s.get("hexa_skill_id", "") for s in (c.get("linked_skill") or [])]
+                cname_clean = c.get("hexa_core_name", "").replace(" ", "")
+                linked_skills_clean = [
+                    s.get("hexa_skill_id", "").replace(" ", "")
+                    for s in (c.get("linked_skill") or [])
+                ]
 
-                # 사냥 전용 공용 코어인 '솔 야누스'는 보스 딜량 계산에서 제외
-                if "솔 야누스" in cname or any("솔 야누스" in skill for skill in linked_skills):
+                # 솔 야누스(새벽/황혼) 등 보스 스펙 무관 코어 완벽 제외
+                if "솔야누스" in cname_clean or any("솔야누스" in sk for sk in linked_skills_clean):
                     continue
 
                 ctype = c.get("hexa_core_type", "")
@@ -185,13 +189,12 @@ def get_character_full_spec(character_name: str):
                     total_fragments += CUMULATIVE_FRAGMENTS[ctype][clevel]
 
         hexa_eff = calc_hexa_efficiency(total_fragments)
-        effective_cp = int(combat_power * (hexa_eff / ANCHOR_HEX_EFFICIENCY))
 
         return {
             "raw_cp": combat_power,
             "total_fragments": total_fragments,
+            "hexa_eff": hexa_eff,
             "hexa_eff_pct": round(hexa_eff * 100, 2),
-            "effective_cp": effective_cp
         }, None
 
     except Exception as e:
@@ -318,7 +321,7 @@ def optimize_boss_route(boss_df: pd.DataFrame, total_time_limit_min: int, prep_t
 def main():
     st.set_page_config(page_title="메이플 보스 배율 & 동선 시뮬레이터", layout="wide")
     st.title("⚡ 메이플스토리 보스 배율 & 주간 동선 시뮬레이터")
-    st.caption("넥슨 Open API 전투력 + 6차 헥사 코어(누적 솔 에르다 조각) 딜 효율 보정 기반")
+    st.caption("넥슨 Open API 전투력 + 6차 헥사 코어(솔 야누스 제외 순수 보스 조각) 딜 효율 보정 기반")
 
     with st.form(key="search_form"):
         col_input, col_btn = st.columns([4, 1])
@@ -352,14 +355,40 @@ def main():
         spec = st.session_state.spec_data
         cname = st.session_state.active_char
 
-        # 상단 스펙 요약 카드 (표기 전투력 vs 헥사 보정 유효 전투력)
+        # 사냥 프리셋 -> 보스 프리셋 전투력 보정 옵션
+        st.sidebar.divider()
+        st.sidebar.header("🛡️ 보스 프리셋 전투력 보정")
+        is_hunting_preset = st.sidebar.checkbox("현재 사냥(드메) 프리셋으로 조회됨", value=False)
+        
+        base_cp_uk = round(spec["raw_cp"] / 100_000_000, 2)
+        if is_hunting_preset:
+            boss_cp_uk = st.sidebar.number_input(
+                "실제 보스 프리셋 전투력 (단위: 억)",
+                min_value=0.1,
+                max_value=50.0,
+                value=round(base_cp_uk * 1.25, 2),
+                step=0.05,
+                help="사냥 템에서 보스 템으로 스위칭했을 때의 실제 인게임 전투력을 입력하세요."
+            )
+            applied_raw_cp = int(boss_cp_uk * 100_000_000)
+        else:
+            applied_raw_cp = spec["raw_cp"]
+
+        # 헥사 딜 효율 비율 적용한 최종 유효 전투력
+        effective_cp = int(applied_raw_cp * (spec["hexa_eff"] / ANCHOR_HEX_EFFICIENCY))
+
+        # 상단 스펙 요약 카드
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("캐릭터", cname)
-        m2.metric("인게임 표기 전투력", f"{spec['raw_cp'] / 100_000_000:.2f} 억", f"{spec['raw_cp']:,}")
-        m3.metric("누적 솔 에르다 조각", f"{spec['total_fragments']:,} 개", f"헥사 딜 효율 {spec['hexa_eff_pct']}%")
-        m4.metric("헥사 보정 유효 전투력", f"{spec['effective_cp'] / 100_000_000:.2f} 억", "4.5만 조각 기준 환산")
+        m2.metric(
+            "적용 전투력" if is_hunting_preset else "인게임 표기 전투력",
+            f"{applied_raw_cp / 100_000_000:.2f} 억",
+            f"조회 원본: {base_cp_uk:.2f}억" if is_hunting_preset else f"{applied_raw_cp:,}"
+        )
+        m3.metric("순수 보스 조각 사용량", f"{spec['total_fragments']:,} 개", f"헥사 딜 효율 {spec['hexa_eff_pct']}%")
+        m4.metric("헥사 보정 유효 전투력", f"{effective_cp / 100_000_000:.2f} 억", "4.5만 조각 기준 환산")
 
-        weekly_df, monthly_df, all_df = calculate_boss_data(spec["effective_cp"])
+        weekly_df, monthly_df, all_df = calculate_boss_data(effective_cp)
 
         tab1, tab2 = st.tabs(["🏆 최적 주간 보스 동선", "📋 40종 보스 전체 예상 배율표"])
 
