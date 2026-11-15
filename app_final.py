@@ -44,10 +44,10 @@ CUMULATIVE_FRAGMENTS = {
     ]
 }
 
-# 실측 조각 사용량 대비 최종 딜 효율 커브 (45,000개 = 100% 기준)
-FRAG_MILESTONES = np.array([0, 2000, 5000, 10000, 15000, 20000, 30000, 40000, 45000], dtype=float)
-FRAG_EFFICIENCY = np.array([0.52, 0.62, 0.69, 0.78, 0.8437, 0.8919, 0.9526, 0.9957, 1.00], dtype=float)
-ANCHOR_HEX_EFFICIENCY = 0.996  # 기준 앵커 데이터(1~7.4억)의 헥사 효율 기준치 (~4만개)
+# 실측 조각 사용량 대비 최종 딜 효율 커브 (40,000개 = 100% 풀강 기준)
+FRAG_MILESTONES = np.array([0, 2000, 5000, 10000, 15000, 20000, 30000, 40000], dtype=float)
+FRAG_EFFICIENCY = np.array([0.52, 0.62, 0.69, 0.78, 0.8437, 0.8919, 0.9526, 1.00], dtype=float)
+ANCHOR_HEX_EFFICIENCY = 1.00  # 기준 앵커 데이터(1~7.4억)의 헥사 효율 기준치 (40,000개 풀강 기준)
 
 def calc_hexa_efficiency(total_fragments: int) -> float:
     return float(np.interp(total_fragments, FRAG_MILESTONES, FRAG_EFFICIENCY))
@@ -321,7 +321,7 @@ def optimize_boss_route(boss_df: pd.DataFrame, total_time_limit_min: int, prep_t
 def main():
     st.set_page_config(page_title="메이플 보스 배율 & 동선 시뮬레이터", layout="wide")
     st.title("⚡ 메이플스토리 보스 배율 & 주간 동선 시뮬레이터")
-    st.caption("넥슨 Open API 전투력 + 6차 헥사 코어(솔 야누스 제외 순수 보스 조각) 딜 효율 보정 기반")
+    st.caption("넥슨 Open API 전투력 + 6차 헥사 코어(솔 야누스 제외, 4만 조각 풀강 기준) 딜 효율 보정 기반")
 
     with st.form(key="search_form"):
         col_input, col_btn = st.columns([4, 1])
@@ -333,98 +333,4 @@ def main():
     st.sidebar.header("⚙️ 주간 보스 동선 설정")
     total_time_limit = st.sidebar.slider("가용 제한 시간 (분)", 10, 240, 60, 5)
     prep_time = st.sidebar.number_input("보스 간 정비/이동 시간 (분)", 0, 5, 1)
-    max_bosses = st.sidebar.number_input("주간 결정석 판매 한도 (개)", 1, 12, 12)
-
-    if "spec_data" not in st.session_state:
-        st.session_state.spec_data = None
-        st.session_state.active_char = None
-
-    if submitted:
-        if not char_name.strip():
-            st.warning("캐릭터 닉네임을 입력해주세요.")
-        else:
-            with st.spinner(f"'{char_name.strip()}' 캐릭터의 전투력 및 헥사 매트릭스 분석 중..."):
-                spec, err = get_character_full_spec(char_name.strip())
-                if err:
-                    st.error(err)
-                else:
-                    st.session_state.spec_data = spec
-                    st.session_state.active_char = char_name.strip()
-
-    if st.session_state.spec_data:
-        spec = st.session_state.spec_data
-        cname = st.session_state.active_char
-
-        # 사냥 프리셋 -> 보스 프리셋 전투력 보정 옵션
-        st.sidebar.divider()
-        st.sidebar.header("🛡️ 보스 프리셋 전투력 보정")
-        is_hunting_preset = st.sidebar.checkbox("현재 사냥(드메) 프리셋으로 조회됨", value=False)
-        
-        base_cp_uk = round(spec["raw_cp"] / 100_000_000, 2)
-        if is_hunting_preset:
-            boss_cp_uk = st.sidebar.number_input(
-                "실제 보스 프리셋 전투력 (단위: 억)",
-                min_value=0.1,
-                max_value=50.0,
-                value=round(base_cp_uk * 1.25, 2),
-                step=0.05,
-                help="사냥 템에서 보스 템으로 스위칭했을 때의 실제 인게임 전투력을 입력하세요."
-            )
-            applied_raw_cp = int(boss_cp_uk * 100_000_000)
-        else:
-            applied_raw_cp = spec["raw_cp"]
-
-        # 헥사 딜 효율 비율 적용한 최종 유효 전투력
-        effective_cp = int(applied_raw_cp * (spec["hexa_eff"] / ANCHOR_HEX_EFFICIENCY))
-
-        # 상단 스펙 요약 카드
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("캐릭터", cname)
-        m2.metric(
-            "적용 전투력" if is_hunting_preset else "인게임 표기 전투력",
-            f"{applied_raw_cp / 100_000_000:.2f} 억",
-            f"조회 원본: {base_cp_uk:.2f}억" if is_hunting_preset else f"{applied_raw_cp:,}"
-        )
-        m3.metric("순수 보스 조각 사용량", f"{spec['total_fragments']:,} 개", f"헥사 딜 효율 {spec['hexa_eff_pct']}%")
-        m4.metric("헥사 보정 유효 전투력", f"{effective_cp / 100_000_000:.2f} 억", "4.5만 조각 기준 환산")
-
-        weekly_df, monthly_df, all_df = calculate_boss_data(effective_cp)
-
-        tab1, tab2 = st.tabs(["🏆 최적 주간 보스 동선", "📋 40종 보스 전체 예상 배율표"])
-
-        with tab1:
-            max_meso, route = optimize_boss_route(weekly_df, total_time_limit, prep_time, max_bosses)
-            total_time = sum(b['weight'] for b in route)
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("주간 총 획득 메소", f"{max_meso / 100_000_000:.2f} 억", f"{max_meso:,} 메소")
-            c2.metric("총 소요 시간", f"{total_time}분 / {total_time_limit}분")
-            c3.metric("처치 보스 수", f"{len(route)}마리 / {max_bosses}마리")
-
-            if not monthly_df.empty:
-                best_bm = monthly_df.iloc[0]
-                st.info(f"🌑 **월간 보스 추천**: {best_bm['boss_group']} ({best_bm['difficulty']}) — 예상 배율 **{best_bm['expected_mult_pct']}%** / 결정석 **{best_bm['meso_uk']}억**")
-
-            if route:
-                result_rows = []
-                for idx, b in enumerate(route, 1):
-                    result_rows.append({
-                        "추천 순서": idx,
-                        "보스 명": b['name'],
-                        "예상 배율": f"{b['mult_pct']}%",
-                        "순수 공략(분)": b['clear_time'],
-                        "정비 포함(분)": b['weight'],
-                        "결정석 가격": f"{b['meso'] / 100_000_000:.2f} 억",
-                        "분당 효율": f"{int(b['meso'] / b['weight'] / 10_000):,} 만/분"
-                    })
-                st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
-            else:
-                st.warning("설정된 가용 시간 내에 20분 컷으로 클리어 가능한 보스가 없습니다.")
-
-        with tab2:
-            st.dataframe(all_df, use_container_width=True, height=600)
-    else:
-        st.info("👆 상단 검색창에 **캐릭터 닉네임**을 입력하고 **[🔍 캐릭터 조회]** 버튼을 눌러주세요.")
-
-if __name__ == "__main__":
-    main()
+    max_boss
