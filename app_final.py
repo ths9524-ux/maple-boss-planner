@@ -163,7 +163,7 @@ def get_character_full_spec(character_name: str):
                 combat_power = int(s.get("stat_value", 0))
                 break
 
-        # 3) 헥사 매트릭스 조회 및 누적 조각 합산
+# 3) 헥사 매트릭스 조회 및 누적 조각 합산 (솔 야누스 제외)
         hexa_res = requests.get(
             f"https://open.api.nexon.com/maplestory/v1/character/hexamatrix?ocid={ocid}",
             headers=headers, timeout=5
@@ -172,6 +172,13 @@ def get_character_full_spec(character_name: str):
         if hexa_res.status_code == 200:
             cores = hexa_res.json().get("character_hexa_core_equipment") or []
             for c in cores:
+                cname = c.get("hexa_core_name", "")
+                linked_skills = [s.get("hexa_skill_id", "") for s in (c.get("linked_skill") or [])]
+
+                # 사냥 전용 공용 코어인 '솔 야누스'는 보스 딜량 계산에서 제외
+                if "솔 야누스" in cname or any("솔 야누스" in skill for skill in linked_skills):
+                    continue
+
                 ctype = c.get("hexa_core_type", "")
                 clevel = min(30, max(0, int(c.get("hexa_core_level", 0))))
                 if ctype in CUMULATIVE_FRAGMENTS:
