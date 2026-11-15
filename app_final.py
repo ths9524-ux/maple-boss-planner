@@ -391,4 +391,55 @@ def main():
         # 2) 헥사환산 전투력 = 환산 전투력 × 헥사 효율 계수
         hexa_converted_cp = int(converted_cp * spec["hexa_eff"])
 
-        # 상단 스펙 요약 카드 (
+        # 상단 스펙 요약 카드 (5칸 구성)
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("캐릭터", cname)
+        m2.metric(
+            "적용 전투력" if is_hunting_preset else "인게임 전투력",
+            f"{applied_raw_cp / 100_000_000:.2f} 억",
+            f"원본: {base_cp_uk:.2f}억" if is_hunting_preset else f"{applied_raw_cp:,}"
+        )
+        m3.metric("환산 전투력 (×1.35)", f"{converted_cp / 100_000_000:.2f} 억", "4만 조각 풀강 기준")
+        m4.metric("순수 보스 조각", f"{spec['total_fragments']:,} 개", f"효율 {spec['hexa_eff_pct']}%")
+        m5.metric("헥사환산 전투력", f"{hexa_converted_cp / 100_000_000:.2f} 억", "보스 배율 산출 기준")
+
+        weekly_df, monthly_df, all_df = calculate_boss_data(hexa_converted_cp)
+
+        tab1, tab2 = st.tabs(["🏆 최적 주간 보스 동선", "📋 40종 보스 전체 예상 배율표"])
+
+        with tab1:
+            max_meso, route = optimize_boss_route(weekly_df, total_time_limit, prep_time, max_bosses)
+            total_time = sum(b['weight'] for b in route)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("주간 총 획득 메소", f"{max_meso / 100_000_000:.2f} 억", f"{max_meso:,} 메소")
+            c2.metric("총 소요 시간", f"{total_time}분 / {total_time_limit}분")
+            c3.metric("처치 보스 수", f"{len(route)}마리 / {max_bosses}마리")
+
+            if not monthly_df.empty:
+                best_bm = monthly_df.iloc[0]
+                st.info(f"🌑 **월간 보스 추천**: {best_bm['boss_group']} ({best_bm['difficulty']}) — 예상 배율 **{best_bm['expected_mult_pct']}%** / 결정석 **{best_bm['meso_uk']}억**")
+
+            if route:
+                result_rows = []
+                for idx, b in enumerate(route, 1):
+                    result_rows.append({
+                        "추천 순서": idx,
+                        "보스 명": b['name'],
+                        "예상 배율": f"{b['mult_pct']}%",
+                        "순수 공략(분)": b['clear_time'],
+                        "정비 포함(분)": b['weight'],
+                        "결정석 가격": f"{b['meso'] / 100_000_000:.2f} 억",
+                        "분당 효율": f"{int(b['meso'] / b['weight'] / 10_000):,} 만/분"
+                    })
+                st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
+            else:
+                st.warning("설정된 가용 시간 내에 20분 컷으로 클리어 가능한 보스가 없습니다.")
+
+        with tab2:
+            st.dataframe(all_df, use_container_width=True, height=600)
+    else:
+        st.info("👆 상단 검색창에 **캐릭터 닉네임**을 입력하고 **[🔍 캐릭터 조회]** 버튼을 눌러주세요.")
+
+if __name__ == "__main__":
+    main()
