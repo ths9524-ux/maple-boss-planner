@@ -18,7 +18,7 @@ def get_api_key() -> str:
     return DEFAULT_NEXON_API_KEY
 
 # ---------------------------------------------------------
-# 1. 정확한 인게임 솔 에르다 조각 누적 소모량 테이블 (레벨 0~30 누적) & 딜 효율 커브
+# 1. 인게임 솔 에르다 조각 누적 소모량 테이블 & 헥사환산 전투력 변환 설정
 # ---------------------------------------------------------
 # 인게임 실제 소모량 기준 (30레벨 풀강: 스킬 4,400 / 마스터리 2,252 / 강화 3,383 / 공용 6,268)
 CUMULATIVE_FRAGMENTS = {
@@ -44,21 +44,34 @@ CUMULATIVE_FRAGMENTS = {
     ]
 }
 
-# 실측 조각 사용량 대비 최종 딜 효율 커브 (40,000개 = 100% 풀강 기준)
+# 표기 전투력 -> 환산 전투력 변환 배수 (실측 평균 1.35배)
+CP_TO_CONVERTED_RATIO = 1.35
+
+# 실측 조각 사용량 대비 풀강(40,000개 = 100%) 대비 헥사환산 비율
 FRAG_MILESTONES = np.array([0, 2000, 5000, 10000, 15000, 20000, 30000, 40000], dtype=float)
-FRAG_EFFICIENCY = np.array([0.52, 0.62, 0.69, 0.78, 0.8437, 0.8919, 0.9526, 1.00], dtype=float)
-ANCHOR_HEX_EFFICIENCY = 1.00  # 기준 앵커 데이터(1~7.4억)의 헥사 효율 기준치 (40,000개 풀강 기준)
+FRAG_EFFICIENCY = np.array([0.52, 0.62, 0.69, 0.78, 0.8300, 0.8919, 0.9526, 1.00], dtype=float)
 
 def calc_hexa_efficiency(total_fragments: int) -> float:
     return float(np.interp(total_fragments, FRAG_MILESTONES, FRAG_EFFICIENCY))
 
 # ---------------------------------------------------------
-# 2. 다중 앵커 메타데이터 (1억~7.4억 실측 배율 & 결정석 가격)
+# 2. 다중 앵커 메타데이터 (헥사환산 전투력 기준 스케일링)
 # ---------------------------------------------------------
-ANCHOR_CPS = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.4]) * 100_000_000
+# 기존 표기 전투력 [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.4]억을 헥사환산 전투력 기준으로 매핑
+ANCHOR_HEXA_CPS = np.array([
+    1.0 * 1.35,
+    2.0 * 1.35,
+    3.0 * 1.35,
+    4.0 * 1.35,
+    5.0 * 1.35,
+    6.0 * 1.35,
+    7.0 * 1.35,
+    10.1335  # 7.4억 실측 헥사환산 전투력
+]) * 100_000_000
+
 MAX_TIME_LIMIT = 20  # 모든 보스 최대 제한 시간: 20분
 
-# (boss_group, difficulty, [1억, 2억, 3억, 4억, 5억, 6억, 7억, 7.4억 배율%], meso_uk, min_time, is_monthly)
+# (boss_group, difficulty, [8개 구간 배율%], meso_uk, min_time, is_monthly)
 MULTI_ANCHOR_BOSS_DATA = [
     # 1행
     ("발드릭스", "익스트림", [5.0, 9.0, 14.0, 18.0, 22.0, 27.0, 31.0, 33.0], 96.00, 8, False),
@@ -179,7 +192,6 @@ def get_character_full_spec(character_name: str):
                     for s in (c.get("linked_skill") or [])
                 ]
 
-                # 솔 야누스(새벽/황혼) 등 보스 스펙 무관 코어 완벽 제외
                 if "솔야누스" in cname_clean or any("솔야누스" in sk for sk in linked_skills_clean):
                     continue
 
@@ -201,25 +213,25 @@ def get_character_full_spec(character_name: str):
         return None, f"API 통신 오류: {str(e)}"
 
 # ---------------------------------------------------------
-# 4. 다중 앵커 보간 및 보스 배율/클리어 시간 계산
+# 4. 헥사환산 전투력 기반 다중 앵커 보간 및 보스 배율 계산
 # ---------------------------------------------------------
-def estimate_user_multiplier(effective_cp: int, anchor_mults: np.ndarray) -> float:
-    if effective_cp <= ANCHOR_CPS[0]:
-        return anchor_mults[0] * (effective_cp / ANCHOR_CPS[0])
-    elif effective_cp >= ANCHOR_CPS[-1]:
-        slope = (anchor_mults[-1] - anchor_mults[-3]) / (ANCHOR_CPS[-1] - ANCHOR_CPS[-3])
-        return anchor_mults[-1] + slope * (effective_cp - ANCHOR_CPS[-1])
+def estimate_user_multiplier(hexa_converted_cp: int, anchor_mults: np.ndarray) -> float:
+    if hexa_converted_cp <= ANCHOR_HEXA_CPS[0]:
+        return anchor_mults[0] * (hexa_converted_cp / ANCHOR_HEXA_CPS[0])
+    elif hexa_converted_cp >= ANCHOR_HEXA_CPS[-1]:
+        slope = (anchor_mults[-1] - anchor_mults[-3]) / (ANCHOR_HEXA_CPS[-1] - ANCHOR_HEXA_CPS[-3])
+        return anchor_mults[-1] + slope * (hexa_converted_cp - ANCHOR_HEXA_CPS[-1])
     else:
-        return float(np.interp(effective_cp, ANCHOR_CPS, anchor_mults))
+        return float(np.interp(hexa_converted_cp, ANCHOR_HEXA_CPS, anchor_mults))
 
 
-def calculate_boss_data(effective_cp: int):
+def calculate_boss_data(hexa_converted_cp: int):
     weekly_rows = []
     monthly_rows = []
     all_rows = []
 
     for b in BOSS_META:
-        user_mult = estimate_user_multiplier(effective_cp, b["anchor_mults"])
+        user_mult = estimate_user_multiplier(hexa_converted_cp, b["anchor_mults"])
         mult_pct = round(user_mult * 100, 1)
 
         if user_mult >= 1.0:
@@ -321,7 +333,7 @@ def optimize_boss_route(boss_df: pd.DataFrame, total_time_limit_min: int, prep_t
 def main():
     st.set_page_config(page_title="메이플 보스 배율 & 동선 시뮬레이터", layout="wide")
     st.title("⚡ 메이플스토리 보스 배율 & 주간 동선 시뮬레이터")
-    st.caption("넥슨 Open API 전투력 + 6차 헥사 코어(솔 야누스 제외, 4만 조각 풀강 기준) 딜 효율 보정 기반")
+    st.caption("환산 전투력(전투력 × 1.35) × 6차 헥사 효율 = 헥사환산 전투력 기반 20분 제한시간 Knapsack DP")
 
     with st.form(key="search_form"):
         col_input, col_btn = st.columns([4, 1])
@@ -374,57 +386,9 @@ def main():
         else:
             applied_raw_cp = spec["raw_cp"]
 
-        # 헥사 딜 효율 비율 적용한 최종 유효 전투력 (40,000 조각 풀강 기준)
-        effective_cp = int(applied_raw_cp * (spec["hexa_eff"] / ANCHOR_HEX_EFFICIENCY))
+        # 1) 풀강 기준 환산 전투력 = 전투력 × 1.35
+        converted_cp = int(applied_raw_cp * CP_TO_CONVERTED_RATIO)
+        # 2) 헥사환산 전투력 = 환산 전투력 × 헥사 효율 계수
+        hexa_converted_cp = int(converted_cp * spec["hexa_eff"])
 
-        # 상단 스펙 요약 카드
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("캐릭터", cname)
-        m2.metric(
-            "적용 전투력" if is_hunting_preset else "인게임 표기 전투력",
-            f"{applied_raw_cp / 100_000_000:.2f} 억",
-            f"조회 원본: {base_cp_uk:.2f}억" if is_hunting_preset else f"{applied_raw_cp:,}"
-        )
-        m3.metric("순수 보스 조각 사용량", f"{spec['total_fragments']:,} 개", f"헥사 딜 효율 {spec['hexa_eff_pct']}%")
-        m4.metric("헥사 보정 유효 전투력", f"{effective_cp / 100_000_000:.2f} 억", "4만 조각 풀강 기준 환산")
-
-        weekly_df, monthly_df, all_df = calculate_boss_data(effective_cp)
-
-        tab1, tab2 = st.tabs(["🏆 최적 주간 보스 동선", "📋 40종 보스 전체 예상 배율표"])
-
-        with tab1:
-            max_meso, route = optimize_boss_route(weekly_df, total_time_limit, prep_time, max_bosses)
-            total_time = sum(b['weight'] for b in route)
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("주간 총 획득 메소", f"{max_meso / 100_000_000:.2f} 억", f"{max_meso:,} 메소")
-            c2.metric("총 소요 시간", f"{total_time}분 / {total_time_limit}분")
-            c3.metric("처치 보스 수", f"{len(route)}마리 / {max_bosses}마리")
-
-            if not monthly_df.empty:
-                best_bm = monthly_df.iloc[0]
-                st.info(f"🌑 **월간 보스 추천**: {best_bm['boss_group']} ({best_bm['difficulty']}) — 예상 배율 **{best_bm['expected_mult_pct']}%** / 결정석 **{best_bm['meso_uk']}억**")
-
-            if route:
-                result_rows = []
-                for idx, b in enumerate(route, 1):
-                    result_rows.append({
-                        "추천 순서": idx,
-                        "보스 명": b['name'],
-                        "예상 배율": f"{b['mult_pct']}%",
-                        "순수 공략(분)": b['clear_time'],
-                        "정비 포함(분)": b['weight'],
-                        "결정석 가격": f"{b['meso'] / 100_000_000:.2f} 억",
-                        "분당 효율": f"{int(b['meso'] / b['weight'] / 10_000):,} 만/분"
-                    })
-                st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
-            else:
-                st.warning("설정된 가용 시간 내에 20분 컷으로 클리어 가능한 보스가 없습니다.")
-
-        with tab2:
-            st.dataframe(all_df, use_container_width=True, height=600)
-    else:
-        st.info("👆 상단 검색창에 **캐릭터 닉네임**을 입력하고 **[🔍 캐릭터 조회]** 버튼을 눌러주세요.")
-
-if __name__ == "__main__":
-    main()
+        # 상단 스펙 요약 카드 (
