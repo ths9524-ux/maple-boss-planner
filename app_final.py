@@ -5,10 +5,8 @@ import requests
 import urllib.parse
 
 # ---------------------------------------------------------
-# 0. 넥슨 Open API 키 설정 (Streamlit Secrets 또는 직접 입력)
+# 0. 넥슨 Open API 키 설정
 # ---------------------------------------------------------
-# Streamlit Cloud의 Settings -> Secrets에 NEXON_API_KEY = "발급받은키" 를 넣어두면 자동 인식됩니다.
-# 로컬에서 바로 실행할 경우 아래 문자열에 API 키를 직접 입력하세요.
 DEFAULT_NEXON_API_KEY = "여기에_네_넥슨_API_키를_입력해줘"
 
 def get_api_key() -> str:
@@ -20,12 +18,46 @@ def get_api_key() -> str:
     return DEFAULT_NEXON_API_KEY
 
 # ---------------------------------------------------------
-# 1. 다중 앵커 메타데이터 (1억, 2억, 3억, 4억, 5억, 6억, 7억, 7.4억 실측 배율)
+# 1. 솔 에르다 조각 누적 소모량 테이블 (레벨 1~30 누적) & 딜 효율 커브
+# ---------------------------------------------------------
+# 코어 종류별 1~30레벨 누적 소모 조각 수 (인덱스 = 레벨)
+CUMULATIVE_FRAGMENTS = {
+    "스킬 코어": [
+        0, 0, 30, 65, 105, 150, 200, 255, 315, 380, 500,
+        630, 770, 920, 1080, 1250, 1430, 1620, 1820, 2030, 2380,
+        2750, 3140, 3550, 3980, 4430, 4900, 5390, 5900, 6430, 7180
+    ],
+    "마스터리 코어": [
+        0, 50, 65, 83, 103, 125, 150, 178, 208, 240, 300,
+        365, 435, 510, 590, 675, 765, 860, 960, 1065, 1240,
+        1425, 1620, 1825, 2040, 2265, 2500, 2745, 3000, 3265, 3640
+    ],
+    "강화 코어": [
+        0, 75, 98, 125, 155, 188, 225, 267, 312, 360, 450,
+        548, 653, 765, 885, 1013, 1148, 1290, 1440, 1598, 1860,
+        2138, 2430, 2738, 3060, 3398, 3750, 4118, 4500, 4898, 5460
+    ],
+    "공용 코어": [
+        0, 125, 163, 207, 257, 313, 375, 444, 519, 600, 750,
+        913, 1088, 1275, 1475, 1688, 1913, 2150, 2400, 2663, 3100,
+        3563, 4050, 4563, 5100, 5663, 6250, 6863, 7500, 8163, 9100
+    ]
+}
+
+# 실측 조각 사용량 대비 최종 딜 효율 커브 (45,000개 = 100% 기준)
+FRAG_MILESTONES = np.array([0, 2000, 5000, 10000, 15000, 20000, 30000, 40000, 45000], dtype=float)
+FRAG_EFFICIENCY = np.array([0.52, 0.62, 0.69, 0.78, 0.8437, 0.8919, 0.9526, 0.9957, 1.00], dtype=float)
+ANCHOR_HEX_EFFICIENCY = 0.996  # 기준 앵커 데이터(1~7.4억)의 헥사 효율 기준치 (~4만개)
+
+def calc_hexa_efficiency(total_fragments: int) -> float:
+    return float(np.interp(total_fragments, FRAG_MILESTONES, FRAG_EFFICIENCY))
+
+# ---------------------------------------------------------
+# 2. 다중 앵커 메타데이터 (1억~7.4억 실측 배율 & 결정석 가격)
 # ---------------------------------------------------------
 ANCHOR_CPS = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.4]) * 100_000_000
-MAX_TIME_LIMIT = 20  # 모든 보스 최대 제한 시간: 20분
+MAX_TIME_LIMIT = 20
 
-# (boss_group, difficulty, [1억, 2억, 3억, 4억, 5억, 6억, 7억, 7.4억 배율%], meso_uk, min_time, is_monthly)
 MULTI_ANCHOR_BOSS_DATA = [
     # 1행
     ("발드릭스", "익스트림", [5.0, 9.0, 14.0, 18.0, 22.0, 27.0, 31.0, 33.0], 96.00, 8, False),
@@ -91,11 +123,11 @@ BOSS_META = [
 ]
 
 # ---------------------------------------------------------
-# 2. 넥슨 Open API 데이터 수집 파이프라인
+# 3. 넥슨 Open API 데이터 수집 (전투력 + 헥사 매트릭스 조각 역산)
 # ---------------------------------------------------------
 @st.cache_data(ttl=300)
-def get_character_combat_power(character_name: str):
-    """내장된 넥슨 API 키를 사용하여 캐릭터의 종합 전투력을 추출"""
+def get_character_full_spec(character_name: str):
+    """전투력과 6차 헥사 코어 레벨(누적 솔 에르다 조각)을 동시에 조회"""
     api_key = get_api_key().strip()
     if not api_key or "여기에_" in api_key:
         return None, "서버에 넥슨 API 키가 설정되지 않았습니다."
@@ -104,9 +136,11 @@ def get_character_combat_power(character_name: str):
     encoded_name = urllib.parse.quote(character_name.strip())
 
     try:
-        # 1) 캐릭터 닉네임으로 ocid 식별자 조회
-        id_url = f"https://open.api.nexon.com/maplestory/v1/id?character_name={encoded_name}"
-        id_res = requests.get(id_url, headers=headers, timeout=5)
+        # 1) OCID 조회
+        id_res = requests.get(
+            f"https://open.api.nexon.com/maplestory/v1/id?character_name={encoded_name}",
+            headers=headers, timeout=5
+        )
         if id_res.status_code != 200:
             err_msg = id_res.json().get("error", {}).get("message", id_res.text)
             return None, f"캐릭터 조회 실패 ({id_res.status_code}): {err_msg}"
@@ -115,49 +149,69 @@ def get_character_combat_power(character_name: str):
         if not ocid:
             return None, "캐릭터 OCID를 찾을 수 없습니다."
 
-        # 2) ocid로 종합 스탯 조회
-        stat_url = f"https://open.api.nexon.com/maplestory/v1/character/stat?ocid={ocid}"
-        stat_res = requests.get(stat_url, headers=headers, timeout=5)
+        # 2) 종합 전투력 조회
+        stat_res = requests.get(
+            f"https://open.api.nexon.com/maplestory/v1/character/stat?ocid={ocid}",
+            headers=headers, timeout=5
+        )
         if stat_res.status_code != 200:
-            err_msg = stat_res.json().get("error", {}).get("message", stat_res.text)
-            return None, f"스탯 조회 실패 ({stat_res.status_code}): {err_msg}"
+            return None, f"스탯 조회 실패 ({stat_res.status_code})"
 
-        final_stats = stat_res.json().get("final_stat", [])
-        if not final_stats:
-            return None, "스탯 데이터가 비어 있습니다. (최근 접속 기록 확인 필요)"
-
-        for s in final_stats:
+        combat_power = 0
+        for s in stat_res.json().get("final_stat", []):
             if s.get("stat_name") == "전투력":
-                return int(s.get("stat_value", 0)), None
+                combat_power = int(s.get("stat_value", 0))
+                break
 
-        return None, "응답 데이터에 '전투력' 항목이 없습니다."
+        # 3) 헥사 매트릭스 조회 및 누적 조각 합산
+        hexa_res = requests.get(
+            f"https://open.api.nexon.com/maplestory/v1/character/hexamatrix?ocid={ocid}",
+            headers=headers, timeout=5
+        )
+        total_fragments = 0
+        if hexa_res.status_code == 200:
+            cores = hexa_res.json().get("character_hexa_core_equipment") or []
+            for c in cores:
+                ctype = c.get("hexa_core_type", "")
+                clevel = min(30, max(0, int(c.get("hexa_core_level", 0))))
+                if ctype in CUMULATIVE_FRAGMENTS:
+                    total_fragments += CUMULATIVE_FRAGMENTS[ctype][clevel]
+
+        hexa_eff = calc_hexa_efficiency(total_fragments)
+        effective_cp = int(combat_power * (hexa_eff / ANCHOR_HEX_EFFICIENCY))
+
+        return {
+            "raw_cp": combat_power,
+            "total_fragments": total_fragments,
+            "hexa_eff_pct": round(hexa_eff * 100, 2),
+            "effective_cp": effective_cp
+        }, None
 
     except Exception as e:
         return None, f"API 통신 오류: {str(e)}"
 
 # ---------------------------------------------------------
-# 3. 다중 앵커 보간 기반 클리어 소요 시간 및 배율 산출 (20분 제한)
+# 4. 다중 앵커 보간 및 보스 배율/클리어 시간 계산
 # ---------------------------------------------------------
-def estimate_user_multiplier(user_cp: int, anchor_mults: np.ndarray) -> float:
-    if user_cp <= ANCHOR_CPS[0]:
-        return anchor_mults[0] * (user_cp / ANCHOR_CPS[0])
-    elif user_cp >= ANCHOR_CPS[-1]:
+def estimate_user_multiplier(effective_cp: int, anchor_mults: np.ndarray) -> float:
+    if effective_cp <= ANCHOR_CPS[0]:
+        return anchor_mults[0] * (effective_cp / ANCHOR_CPS[0])
+    elif effective_cp >= ANCHOR_CPS[-1]:
         slope = (anchor_mults[-1] - anchor_mults[-3]) / (ANCHOR_CPS[-1] - ANCHOR_CPS[-3])
-        return anchor_mults[-1] + slope * (user_cp - ANCHOR_CPS[-1])
+        return anchor_mults[-1] + slope * (effective_cp - ANCHOR_CPS[-1])
     else:
-        return float(np.interp(user_cp, ANCHOR_CPS, anchor_mults))
+        return float(np.interp(effective_cp, ANCHOR_CPS, anchor_mults))
 
 
-def calculate_boss_data(user_combat_power: int):
+def calculate_boss_data(effective_cp: int):
     weekly_rows = []
     monthly_rows = []
     all_rows = []
 
     for b in BOSS_META:
-        user_mult = estimate_user_multiplier(user_combat_power, b["anchor_mults"])
+        user_mult = estimate_user_multiplier(effective_cp, b["anchor_mults"])
         mult_pct = round(user_mult * 100, 1)
 
-        # 100% 이상이면 20분 이내 클리어 가능
         if user_mult >= 1.0:
             raw_time = MAX_TIME_LIMIT / (user_mult ** 0.85)
             estimated_time = max(b["min_time"], int(np.ceil(raw_time)))
@@ -192,7 +246,7 @@ def calculate_boss_data(user_combat_power: int):
     return pd.DataFrame(weekly_rows), pd.DataFrame(monthly_rows), pd.DataFrame(all_rows)
 
 # ---------------------------------------------------------
-# 4. 2차원 Knapsack DP 최적화 알고리즘 (주간 보스 최대 12마리)
+# 5. 2차원 Knapsack DP 최적화 알고리즘
 # ---------------------------------------------------------
 def optimize_boss_route(boss_df: pd.DataFrame, total_time_limit_min: int, prep_time_min: int, max_boss_count: int = 12):
     if boss_df.empty:
@@ -228,7 +282,6 @@ def optimize_boss_route(boss_df: pd.DataFrame, total_time_limit_min: int, prep_t
         for w in range(W + 1):
             for c in range(C + 1):
                 dp[i][w][c] = dp[i - 1][w][c]
-
                 if c >= 1:
                     for opt_idx, opt in enumerate(current_options):
                         if w >= opt['weight']:
@@ -253,51 +306,53 @@ def optimize_boss_route(boss_df: pd.DataFrame, total_time_limit_min: int, prep_t
     return int(dp[num_groups][W][C]), selected_bosses
 
 # ---------------------------------------------------------
-# 5. UI 화면 구성 (닉네임 입력 전용)
+# 6. UI 화면 구성
 # ---------------------------------------------------------
 def main():
     st.set_page_config(page_title="메이플 보스 배율 & 동선 시뮬레이터", layout="wide")
     st.title("⚡ 메이플스토리 보스 배율 & 주간 동선 시뮬레이터")
-    st.caption("캐릭터 닉네임 조회 시 인게임 전투력을 자동 수집하여 40종 보스 예상 배율 및 최적 동선을 산출합니다.")
+    st.caption("넥슨 Open API 전투력 + 6차 헥사 코어(누적 솔 에르다 조각) 딜 효율 보정 기반")
 
-    # 메인 상단 검색 바 (닉네임만 입력)
     with st.form(key="search_form"):
         col_input, col_btn = st.columns([4, 1])
         with col_input:
-            char_name = st.text_input("캐릭터 닉네임 입력", placeholder="예: 아델, 에반 등 캐릭터 닉네임을 입력하고 조회 버튼을 누르세요", label_visibility="collapsed")
+            char_name = st.text_input("캐릭터 닉네임 입력", placeholder="캐릭터 닉네임을 입력하고 조회 버튼을 누르세요", label_visibility="collapsed")
         with col_btn:
             submitted = st.form_submit_button("🔍 캐릭터 조회", type="primary", use_container_width=True)
 
-    # 사이드바 동선 최적화 옵션
     st.sidebar.header("⚙️ 주간 보스 동선 설정")
     total_time_limit = st.sidebar.slider("가용 제한 시간 (분)", 10, 240, 60, 5)
     prep_time = st.sidebar.number_input("보스 간 정비/이동 시간 (분)", 0, 5, 1)
     max_bosses = st.sidebar.number_input("주간 결정석 판매 한도 (개)", 1, 12, 12)
 
-    if "active_char" not in st.session_state:
+    if "spec_data" not in st.session_state:
+        st.session_state.spec_data = None
         st.session_state.active_char = None
-        st.session_state.active_cp = 0
 
     if submitted:
         if not char_name.strip():
             st.warning("캐릭터 닉네임을 입력해주세요.")
         else:
-            with st.spinner(f"'{char_name.strip()}' 캐릭터의 전투력을 불러오는 중..."):
-                cp, err = get_character_combat_power(char_name.strip())
+            with st.spinner(f"'{char_name.strip()}' 캐릭터의 전투력 및 헥사 매트릭스 분석 중..."):
+                spec, err = get_character_full_spec(char_name.strip())
                 if err:
                     st.error(err)
                 else:
+                    st.session_state.spec_data = spec
                     st.session_state.active_char = char_name.strip()
-                    st.session_state.active_cp = cp
 
-    # 캐릭터 조회가 완료된 경우에만 결과 출력
-    if st.session_state.active_cp > 0:
-        cp = st.session_state.active_cp
+    if st.session_state.spec_data:
+        spec = st.session_state.spec_data
         cname = st.session_state.active_char
 
-        st.success(f"**[{cname}]** 조회 완료 — 인게임 종합 전투력: **{cp:,}** ({cp / 100_000_000:.2f}억)")
+        # 상단 스펙 요약 카드 (표기 전투력 vs 헥사 보정 유효 전투력)
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("캐릭터", cname)
+        m2.metric("인게임 표기 전투력", f"{spec['raw_cp'] / 100_000_000:.2f} 억", f"{spec['raw_cp']:,}")
+        m3.metric("누적 솔 에르다 조각", f"{spec['total_fragments']:,} 개", f"헥사 딜 효율 {spec['hexa_eff_pct']}%")
+        m4.metric("헥사 보정 유효 전투력", f"{spec['effective_cp'] / 100_000_000:.2f} 억", "4.5만 조각 기준 환산")
 
-        weekly_df, monthly_df, all_df = calculate_boss_data(cp)
+        weekly_df, monthly_df, all_df = calculate_boss_data(spec["effective_cp"])
 
         tab1, tab2 = st.tabs(["🏆 최적 주간 보스 동선", "📋 40종 보스 전체 예상 배율표"])
 
@@ -331,7 +386,6 @@ def main():
                 st.warning("설정된 가용 시간 내에 20분 컷으로 클리어 가능한 보스가 없습니다.")
 
         with tab2:
-            st.subheader(f"📊 [{cname}] 전투력({cp / 100_000_000:.2f}억) 기준 40종 보스 환산 배율")
             st.dataframe(all_df, use_container_width=True, height=600)
     else:
         st.info("👆 상단 검색창에 **캐릭터 닉네임**을 입력하고 **[🔍 캐릭터 조회]** 버튼을 눌러주세요.")
